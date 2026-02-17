@@ -1642,6 +1642,20 @@ namespace drachtio {
                 }
                 else {
                     DR_LOG(log_debug) << "SipDialogController::processResponseInsideDialog: no session expires header found";
+                    /* Re-arm existing session timer even without Session-Expires in response.
+                       This ensures that our application-level re-INVITE refreshes reset the timer,
+                       preventing premature BYE when the remote end does not include Session-Expires
+                       in its 200 OK response to our refresh re-INVITE. */
+                    nta_leg_t* leg2 = nta_leg_by_call_id(m_pController->getAgent(), sip->sip_call_id->i_id);
+                    std::shared_ptr<SipDialog> dlg2;
+                    if (leg2 && findDialogByLeg(leg2, dlg2) && dlg2->hasSessionTimer()) {
+                        unsigned long existingInterval = dlg2->getSessionExpiresSecs();
+                        if (existingInterval > 0) {
+                            DR_LOG(log_info) << "SipDialogController::processResponseInsideDialog: re-arming session timer with existing interval " << existingInterval;
+                            dlg2->setSessionTimer(existingInterval,
+                                dlg2->areWeRefresher() ? SipDialog::we_are_refresher : SipDialog::they_are_refresher);
+                        }
+                    }
                 }
             }
             if (rip->shouldClearDialogOnResponse()) {
@@ -1686,9 +1700,18 @@ namespace drachtio {
         if( findRIPByOrq( orq, rip ) ) {
 
             if( sip->sip_status->st_status != 200 ) {
-                DR_LOG(log_info) << "SipDialogController::processResponseToRefreshingReinvite: reinvite failed (status="
-                                 << sip->sip_status->st_status << ") - clearing dialog";
-                notifyTerminateStaleDialog( dlg );
+                DR_LOG(log_warning) << "SipDialogController::processResponseToRefreshingReinvite: reinvite failed (status="
+                                 << sip->sip_status->st_status << ") - re-arming timer instead of clearing dialog";
+                /* Do not tear down the dialog on non-200 responses to refreshing re-INVITEs.
+                   The remote end may reject the re-INVITE (e.g. 504) but the dialog is still valid.
+                   Re-arm the session timer so we try again later. */
+                if (dlg->hasSessionTimer()) {
+                    unsigned long existingInterval = dlg->getSessionExpiresSecs();
+                    if (existingInterval > 0) {
+                        dlg->setSessionTimer(existingInterval,
+                            dlg->areWeRefresher() ? SipDialog::we_are_refresher : SipDialog::they_are_refresher);
+                    }
+                }
                 clearRIP( orq );
                 return 0;
             }
