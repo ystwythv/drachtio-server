@@ -1683,7 +1683,7 @@ namespace drachtio {
 		return 0 ;
     }
     int SipDialogController::processResponseToRefreshingReinvite( nta_outgoing_t* orq, sip_t const* sip ) {
-        DR_LOG(log_debug) << "SipDialogController::processResponseToRefreshingReinvite: "  ;
+        DR_LOG(log_info) << "SipDialogController::processResponseToRefreshingReinvite: status=" << sip->sip_status->st_status  ;
         ostringstream o ;
         std::shared_ptr<RIP> rip  ;
 
@@ -1698,6 +1698,7 @@ namespace drachtio {
             assert(0) ;
         }
         if( findRIPByOrq( orq, rip ) ) {
+            DR_LOG(log_info) << "SipDialogController::processResponseToRefreshingReinvite: found RIP, status=" << sip->sip_status->st_status ;
 
             if( sip->sip_status->st_status != 200 ) {
                 DR_LOG(log_warning) << "SipDialogController::processResponseToRefreshingReinvite: reinvite failed (status="
@@ -1724,6 +1725,25 @@ namespace drachtio {
                         !se->x_refresher || 0 == strcmp( se->x_refresher, "uac") ? 
                             SipDialog::we_are_refresher : 
                             SipDialog::they_are_refresher ) ;
+                }
+                else {
+                    /* Re-arm session timer even without Session-Expires in response.
+                       The remote end may not include Session-Expires in its 200 OK response
+                       to our refreshing re-INVITE, but the dialog is still valid.
+                       Note: doSessionTimerHandling clears the timer state before we get here,
+                       so we use the interval from the outgoing request instead. */
+                    sip_session_expires_t* outSe = NULL;
+                    nta_outgoing_t* req = orq;
+                    msg_t* reqMsg = nta_outgoing_getrequest(req);
+                    if (reqMsg) {
+                        sip_t* reqSip = sip_object(reqMsg);
+                        if (reqSip) outSe = reqSip->sip_session_expires;
+                        if (outSe) {
+                            DR_LOG(log_info) << "SipDialogController::processResponseToRefreshingReinvite: re-arming session timer with interval " << outSe->x_delta << " from outgoing request";
+                            dlg->setSessionTimer(outSe->x_delta, SipDialog::we_are_refresher);
+                        }
+                        msg_destroy(reqMsg);
+                    }
                 }
              }
 
