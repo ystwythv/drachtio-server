@@ -891,11 +891,27 @@ namespace drachtio {
             tport_unref(tp);
 
             if (sip->sip_cseq->cs_method == sip_method_invite && sip->sip_status->st_status == 200 && sip->sip_session_expires) {
-                DR_LOG(log_info) << "SipDialogController::processResponseOutsideDialog - (UAC) detected session timer header: ";
-                dlg->setSessionTimer( sip->sip_session_expires->x_delta, 
-                    !sip->sip_session_expires->x_refresher || 0 == strcmp( sip->sip_session_expires->x_refresher, "uac") ? 
-                    SipDialog::we_are_refresher : 
-                    SipDialog::they_are_refresher) ;
+                // Only activate session timer if OUR outgoing INVITE included Session-Expires.
+                // If the app deliberately stripped Session-Expires (e.g. via proxyRequestHeaders),
+                // we should not activate a timer just because the far end's response includes one.
+                msg_t* reqMsg = nta_outgoing_getrequest(orq);
+                bool weRequestedSessionTimer = false;
+                if (reqMsg) {
+                    sip_t* reqSip = sip_object(reqMsg);
+                    if (reqSip && reqSip->sip_session_expires) {
+                        weRequestedSessionTimer = true;
+                    }
+                    msg_destroy(reqMsg);
+                }
+                if (weRequestedSessionTimer) {
+                    DR_LOG(log_info) << "SipDialogController::processResponseOutsideDialog - (UAC) activating session timer: " << sip->sip_session_expires->x_delta;
+                    dlg->setSessionTimer( sip->sip_session_expires->x_delta,
+                        !sip->sip_session_expires->x_refresher || 0 == strcmp( sip->sip_session_expires->x_refresher, "uac") ?
+                        SipDialog::we_are_refresher :
+                        SipDialog::they_are_refresher) ;
+                } else {
+                    DR_LOG(log_info) << "SipDialogController::processResponseOutsideDialog - (UAC) ignoring session timer in response (our INVITE had no Session-Expires)";
+                }
             }
             else if (sip->sip_status->st_status > 200) {
                 IIP_Clear(m_invitesInProgress, iip);
@@ -1651,7 +1667,7 @@ namespace drachtio {
                     }
                     if( sip->sip_session_expires ) {
                         dlg->setSessionTimer( sip->sip_session_expires->x_delta, 
-                            (!sip->sip_session_expires->x_refresher && weAreRefresher) ||(sip->sip_session_expires->x_refresher && 0 == strcmp( sip->sip_session_expires->x_refresher, "uac")) ? 
+                            (!sip->sip_session_expires->x_refresher && !weAreRefresher) ||(sip->sip_session_expires->x_refresher && 0 == strcmp( sip->sip_session_expires->x_refresher, "uac")) ? 
                             SipDialog::they_are_refresher : 
                             SipDialog::we_are_refresher) ;
                     }
@@ -1789,12 +1805,16 @@ namespace drachtio {
                     nta_leg_t* leg = nta_leg_by_call_id(m_pController->getAgent(), sip->sip_call_id->i_id);
                     DR_LOG(log_debug) << "SipDialogController::processResponseInsideDialog: searching for dialog by leg " << std::hex << (void *) leg;
                     if(leg && findDialogByLeg( leg, dlg )) {
-                        DR_LOG(log_debug) << "SipDialogController::processResponseInsideDialog: (re)setting session expires timer to " <<  se->x_delta;
-                        //TODO: if session-expires value is less than min-se ACK and then BYE with Reason header    
-                        dlg->setSessionTimer( se->x_delta, 
-                            !se->x_refresher || 0 == strcmp( se->x_refresher, "uac") ? 
-                                SipDialog::we_are_refresher : 
-                                SipDialog::they_are_refresher ) ;
+                        if (dlg->hasSessionTimer()) {
+                            DR_LOG(log_debug) << "SipDialogController::processResponseInsideDialog: (re)setting session expires timer to " <<  se->x_delta;
+                            //TODO: if session-expires value is less than min-se ACK and then BYE with Reason header
+                            dlg->setSessionTimer( se->x_delta,
+                                !se->x_refresher || 0 == strcmp( se->x_refresher, "uac") ?
+                                    SipDialog::we_are_refresher :
+                                    SipDialog::they_are_refresher ) ;
+                        } else {
+                            DR_LOG(log_info) << "SipDialogController::processResponseInsideDialog: ignoring Session-Expires in re-INVITE response (session timer was not originally activated)";
+                        }
                     }
                     else {
                         DR_LOG(log_debug) << "SipDialogController::processResponseInsideDialog: unable to find dialog for leg " << std::hex << (void *) leg;
@@ -1802,6 +1822,20 @@ namespace drachtio {
                 }
                 else {
                     DR_LOG(log_debug) << "SipDialogController::processResponseInsideDialog: no session expires header found";
+                    /* Re-arm existing session timer even without Session-Expires in response.
+                       This ensures that our application-level re-INVITE refreshes reset the timer,
+                       preventing premature BYE when the remote end does not include Session-Expires
+                       in its 200 OK response to our refresh re-INVITE. */
+                    nta_leg_t* leg2 = nta_leg_by_call_id(m_pController->getAgent(), sip->sip_call_id->i_id);
+                    std::shared_ptr<SipDialog> dlg2;
+                    if (leg2 && findDialogByLeg(leg2, dlg2) && dlg2->hasSessionTimer()) {
+                        unsigned long existingInterval = dlg2->getSessionExpiresSecs();
+                        if (existingInterval > 0) {
+                            DR_LOG(log_info) << "SipDialogController::processResponseInsideDialog: re-arming session timer with existing interval " << existingInterval;
+                            dlg2->setSessionTimer(existingInterval,
+                                dlg2->areWeRefresher() ? SipDialog::we_are_refresher : SipDialog::they_are_refresher);
+                        }
+                    }
                 }
             }
             if (rip->shouldClearDialogOnResponse()) {
@@ -1829,7 +1863,7 @@ namespace drachtio {
 		return 0 ;
     }
     int SipDialogController::processResponseToRefreshingReinvite( nta_outgoing_t* orq, sip_t const* sip ) {
-        DR_LOG(log_debug) << "SipDialogController::processResponseToRefreshingReinvite: "  ;
+        DR_LOG(log_info) << "SipDialogController::processResponseToRefreshingReinvite: status=" << sip->sip_status->st_status  ;
         ostringstream o ;
         std::shared_ptr<RIP> rip  ;
 
@@ -1848,11 +1882,21 @@ namespace drachtio {
             return 0;
         }
         if( findRIPByOrq( orq, rip ) ) {
+            DR_LOG(log_info) << "SipDialogController::processResponseToRefreshingReinvite: found RIP, status=" << sip->sip_status->st_status ;
 
             if( sip->sip_status->st_status != 200 ) {
-                DR_LOG(log_info) << "SipDialogController::processResponseToRefreshingReinvite: reinvite failed (status="
-                                 << sip->sip_status->st_status << ") - clearing dialog";
-                notifyTerminateStaleDialog( dlg );
+                DR_LOG(log_warning) << "SipDialogController::processResponseToRefreshingReinvite: reinvite failed (status="
+                                 << sip->sip_status->st_status << ") - re-arming timer instead of clearing dialog";
+                /* Do not tear down the dialog on non-200 responses to refreshing re-INVITEs.
+                   The remote end may reject the re-INVITE (e.g. 504) but the dialog is still valid.
+                   Re-arm the session timer so we try again later. */
+                if (dlg->hasSessionTimer()) {
+                    unsigned long existingInterval = dlg->getSessionExpiresSecs();
+                    if (existingInterval > 0) {
+                        dlg->setSessionTimer(existingInterval,
+                            dlg->areWeRefresher() ? SipDialog::we_are_refresher : SipDialog::they_are_refresher);
+                    }
+                }
                 clearRIP( orq );
                 return 0;
             }
@@ -1865,6 +1909,25 @@ namespace drachtio {
                         !se->x_refresher || 0 == strcmp( se->x_refresher, "uac") ? 
                             SipDialog::we_are_refresher : 
                             SipDialog::they_are_refresher ) ;
+                }
+                else {
+                    /* Re-arm session timer even without Session-Expires in response.
+                       The remote end may not include Session-Expires in its 200 OK response
+                       to our refreshing re-INVITE, but the dialog is still valid.
+                       Note: doSessionTimerHandling clears the timer state before we get here,
+                       so we use the interval from the outgoing request instead. */
+                    sip_session_expires_t* outSe = NULL;
+                    nta_outgoing_t* req = orq;
+                    msg_t* reqMsg = nta_outgoing_getrequest(req);
+                    if (reqMsg) {
+                        sip_t* reqSip = sip_object(reqMsg);
+                        if (reqSip) outSe = reqSip->sip_session_expires;
+                        if (outSe) {
+                            DR_LOG(log_info) << "SipDialogController::processResponseToRefreshingReinvite: re-arming session timer with interval " << outSe->x_delta << " from outgoing request";
+                            dlg->setSessionTimer(outSe->x_delta, SipDialog::we_are_refresher);
+                        }
+                        msg_destroy(reqMsg);
+                    }
                 }
              }
 
