@@ -857,11 +857,27 @@ namespace drachtio {
             tport_unref(tp);
 
             if (sip->sip_cseq->cs_method == sip_method_invite && sip->sip_status->st_status == 200 && sip->sip_session_expires) {
-                DR_LOG(log_info) << "SipDialogController::processResponseOutsideDialog - (UAC) detected session timer header: ";
-                dlg->setSessionTimer( sip->sip_session_expires->x_delta, 
-                    !sip->sip_session_expires->x_refresher || 0 == strcmp( sip->sip_session_expires->x_refresher, "uac") ? 
-                    SipDialog::we_are_refresher : 
-                    SipDialog::they_are_refresher) ;
+                // Only activate session timer if OUR outgoing INVITE included Session-Expires.
+                // If the app deliberately stripped Session-Expires (e.g. via proxyRequestHeaders),
+                // we should not activate a timer just because the far end's response includes one.
+                msg_t* reqMsg = nta_outgoing_getrequest(orq);
+                bool weRequestedSessionTimer = false;
+                if (reqMsg) {
+                    sip_t* reqSip = sip_object(reqMsg);
+                    if (reqSip && reqSip->sip_session_expires) {
+                        weRequestedSessionTimer = true;
+                    }
+                    msg_destroy(reqMsg);
+                }
+                if (weRequestedSessionTimer) {
+                    DR_LOG(log_info) << "SipDialogController::processResponseOutsideDialog - (UAC) activating session timer: " << sip->sip_session_expires->x_delta;
+                    dlg->setSessionTimer( sip->sip_session_expires->x_delta,
+                        !sip->sip_session_expires->x_refresher || 0 == strcmp( sip->sip_session_expires->x_refresher, "uac") ?
+                        SipDialog::we_are_refresher :
+                        SipDialog::they_are_refresher) ;
+                } else {
+                    DR_LOG(log_info) << "SipDialogController::processResponseOutsideDialog - (UAC) ignoring session timer in response (our INVITE had no Session-Expires)";
+                }
             }
             else if (sip->sip_status->st_status > 200) {
                 IIP_Clear(m_invitesInProgress, iip);
