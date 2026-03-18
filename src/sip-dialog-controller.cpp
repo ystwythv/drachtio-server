@@ -1645,12 +1645,16 @@ namespace drachtio {
                     nta_leg_t* leg = nta_leg_by_call_id(m_pController->getAgent(), sip->sip_call_id->i_id);
                     DR_LOG(log_debug) << "SipDialogController::processResponseInsideDialog: searching for dialog by leg " << std::hex << (void *) leg;
                     if(leg && findDialogByLeg( leg, dlg )) {
-                        DR_LOG(log_debug) << "SipDialogController::processResponseInsideDialog: (re)setting session expires timer to " <<  se->x_delta;
-                        //TODO: if session-expires value is less than min-se ACK and then BYE with Reason header    
-                        dlg->setSessionTimer( se->x_delta, 
-                            !se->x_refresher || 0 == strcmp( se->x_refresher, "uac") ? 
-                                SipDialog::we_are_refresher : 
-                                SipDialog::they_are_refresher ) ;
+                        if (dlg->hasSessionTimer()) {
+                            DR_LOG(log_debug) << "SipDialogController::processResponseInsideDialog: (re)setting session expires timer to " <<  se->x_delta;
+                            //TODO: if session-expires value is less than min-se ACK and then BYE with Reason header
+                            dlg->setSessionTimer( se->x_delta,
+                                !se->x_refresher || 0 == strcmp( se->x_refresher, "uac") ?
+                                    SipDialog::we_are_refresher :
+                                    SipDialog::they_are_refresher ) ;
+                        } else {
+                            DR_LOG(log_info) << "SipDialogController::processResponseInsideDialog: ignoring Session-Expires in re-INVITE response (session timer was not originally activated)";
+                        }
                     }
                     else {
                         DR_LOG(log_debug) << "SipDialogController::processResponseInsideDialog: unable to find dialog for leg " << std::hex << (void *) leg;
