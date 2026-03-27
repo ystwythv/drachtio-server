@@ -1300,6 +1300,15 @@ namespace drachtio {
                                 dlg->setLocalContentType( contentType ) ;
                             }
                         }
+
+                        /* Warn if responding with SDP to a no-SDP re-INVITE (late-offer scenario).
+                           The ACK will carry the answer SDP. If the application does not process
+                           the ACK's SDP (e.g. through rtpengine), the media path may be corrupted. */
+                        if( 200 == code && sip->sip_request->rq_method == sip_method_invite && !sip->sip_payload ) {
+                            DR_LOG(log_warning) << "SipDialogController::doRespondToSipRequest - "
+                                << "responding with SDP to a no-SDP re-INVITE (late-offer); "
+                                << "the ACK will contain the answer SDP which must be processed by the application";
+                        }
                     }
 
                     /* set session timer if required */
@@ -1649,8 +1658,9 @@ namespace drachtio {
 
                 /* if this is a re-INVITE or an UPDATE deal with session timers */
                 if( sip_method_invite == sip->sip_request->rq_method || sip_method_update == sip->sip_request->rq_method ) {
+                    bool hadSessionTimer = dlg->hasSessionTimer();
                     bool weAreRefresher = false;
-                    if( dlg->hasSessionTimer() ) { 
+                    if( hadSessionTimer ) {
                         DR_LOG(log_info) << "SipDialogController::processRequestInsideDialog - canceling session expires timer due to re-invite"  ;
                         weAreRefresher = dlg->areWeRefresher();
                         dlg->cancelSessionTimer() ;
@@ -1660,16 +1670,26 @@ namespace drachtio {
                     if( sip->sip_session_expires && sip->sip_session_expires->x_delta < dlg->getMinSE() ) {
                         ostringstream o ;
                         o << dlg->getMinSE() ;
-                        nta_incoming_treply( irq, SIP_422_SESSION_TIMER_TOO_SMALL, 
+                        nta_incoming_treply( irq, SIP_422_SESSION_TIMER_TOO_SMALL,
                             SIPTAG_MIN_SE_STR(o.str().c_str()),
-                            TAG_END() ) ;  
-                        return 0 ;             
+                            TAG_END() ) ;
+                        return 0 ;
                     }
                     if( sip->sip_session_expires ) {
-                        dlg->setSessionTimer( sip->sip_session_expires->x_delta, 
-                            (!sip->sip_session_expires->x_refresher && !weAreRefresher) ||(sip->sip_session_expires->x_refresher && 0 == strcmp( sip->sip_session_expires->x_refresher, "uac")) ? 
-                            SipDialog::they_are_refresher : 
-                            SipDialog::we_are_refresher) ;
+                        /* Only (re)activate session timer if the dialog previously had one.
+                           If the app deliberately avoided session timers on this dialog
+                           (e.g. by stripping Session-Expires from the outgoing INVITE),
+                           an incoming re-INVITE with Session-Expires should not activate one.
+                           This mirrors the guard in processResponseInsideDialog. */
+                        if( hadSessionTimer ) {
+                            dlg->setSessionTimer( sip->sip_session_expires->x_delta,
+                                (!sip->sip_session_expires->x_refresher && !weAreRefresher) ||(sip->sip_session_expires->x_refresher && 0 == strcmp( sip->sip_session_expires->x_refresher, "uac")) ?
+                                SipDialog::they_are_refresher :
+                                SipDialog::we_are_refresher) ;
+                        } else {
+                            DR_LOG(log_info) << "SipDialogController::processRequestInsideDialog - "
+                                << "ignoring Session-Expires in re-INVITE (session timer was not originally activated on this dialog)";
+                        }
                     }
 
                 }
